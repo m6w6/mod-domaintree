@@ -1,0 +1,9 @@
+mod_domaintree ChangeLog
+========================
+$Id$
+
+v1.1   -- 2005/06/13
+~~~~~~~~~~~~~~~~~~~~
+	* Added DomainTreeScriptAlias directive
+	* Added DomainTreeScriptRecursion directive
+
