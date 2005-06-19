@@ -2,7 +2,7 @@ mod_domaintree ChangeLog
 ========================
 $Id$
 
-v1.2   -- 2005/06/17 (not yet released)
+v1.2   -- 2005/06/19
 ~~~~~~~~~~~~~~~~~~~~
 	* DomainTreeAlias now understands 2 simple placeholders,
 	  ? for any char and * for any string until next matching char
