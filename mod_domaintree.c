@@ -3,7 +3,7 @@
  *
  * $Id$
  *
- * Copyright 2005 Michael Wallner <mike@iworks.at
+ * Copyright 2005 Michael Wallner <mike@iworks.at>
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,10 +24,11 @@
  * DomainTreeStripWWW On
  * DomainTreePrefix /sites
  * DomainTreeSuffix /html
+ * DomainTreeCache 5
  * DomainTreeAliasRecursion Off
  * DomainTreeAlias /??/exmaple /com/exmaple
  * DomainTreeAlias /???/example /com/example
- * DomainTreeAlais /*one/ /anyone/
+ * DomainTreeAlias /*one/ /anyone/
  *
  *	/sites
  *		+- /at
@@ -49,29 +50,30 @@
 
 #define MODULE	"mod_domaintree"
 #define AUTHOR	"mike@php.net"
-#define VERSION "1.2"
+#define VERSION "1.3"
 
 /* {{{ Includes */
 
+#include "apr.h"
+#include "apr_lib.h"
+#include "apr_hash.h"
+#include "apr_tables.h"
+#include "apr_strings.h"
+
+#if APR_HAVE_UNISTD_H
+#include <unistd.h>
+#endif
+
+#define APR_WANT_MEMFUNC
+#define APR_WANT_STRFUNC
+#include "apr_want.h"
+
 #include "httpd.h"
 #include "http_config.h"
-
-#define CORE_PRIVATE
 #include "http_core.h"
-#undef CORE_PRIVATE
-
 #include "http_log.h"
 #include "http_protocol.h"
 #include "http_request.h"
-
-#include "apr.h"
-#include "apr_lib.h"
-#include "apr_ring.h"
-#include "apr_hash.h"
-#include "apr_strings.h"
-
-#define APR_WANT_STRFUNC
-#include "apr_want.h"
 
 /* }}} */
 /* {{{ domaintree_module */
@@ -84,8 +86,11 @@ module AP_MODULE_DECLARE_DATA domaintree_module;
 #define MOD_DT_CNF domaintree_conf
 #define MOD_DT_PTR (&domaintree_module)
 
+#define GET_MOD_DT_CNF(srv) ((MOD_DT_CNF *) ap_get_module_config((srv)->module_config, MOD_DT_PTR))
+
 #define NUL '\0'
 #define EMPTY(str) ((str == NULL) || (*(str) == NUL))
+#define local static APR_INLINE
 
 #define DT_LOG_ERR ap_log_error(APLOG_MARK, APLOG_ERR, APR_SUCCESS, DT->server, 
 #define DT_LOG_WRN ap_log_error(APLOG_MARK, APLOG_WARNING, APR_SUCCESS, DT->server, 
@@ -95,30 +100,40 @@ module AP_MODULE_DECLARE_DATA domaintree_module;
 typedef int STATUS;
 
 typedef struct {
-	apr_hash_t	*hashtable;
-	size_t		recursion;
+	long		recursion;
+	apr_table_t	*faketable;
 } aliases_t;
+
+struct dircache_entry {
+	char		*host;
+	char		*path;
+	apr_time_t	lacc;
+	apr_pool_t	*pool;
+};
+
+typedef struct {
+	long				clim;
+	apr_hash_t			*hmap;
+	apr_pool_t			*pool;
+	apr_global_mutex_t	*lock;
+} dircache_t;
 
 typedef struct {
 	server_rec	*server;
 	int			enabled;
 	int			stripwww;
-	size_t		maxdepth;
+	int			statroot;
+	long		maxdepth;
 	char		*prefix;
 	char		*suffix;
 	aliases_t	aliases;
+	dircache_t	dircache;
 } domaintree_conf;
-
-struct domaintree_entry {
-	char *name;
-	APR_RING_ENTRY(domaintree_entry) link;
-};
-APR_RING_HEAD(domaintree, domaintree_entry);
 
 /* }}} */
 /* {{{ Helpers */
 
-static APR_INLINE char *strtr(char *string, char from, char to)
+local char *strtr(char *string, char from, char to)
 {
 	char *ptr = string;
 	
@@ -130,14 +145,17 @@ static APR_INLINE char *strtr(char *string, char from, char to)
 	return string;
 }
 
-static APR_INLINE char *trim(char *string, size_t length, char what, int l, int r)
+#define TRIM_LEFT 1
+#define TRIM_RIGHT 2
+#define TRIM_BOTH (TRIM_LEFT|TRIM_RIGHT)
+local char *trim(char *string, size_t length, char what, int where)
 {
-	if (r) {
+	if (where & TRIM_RIGHT) {
 		while (length-- && (string[length] == what)) {
 			string[length] = NUL;
 		}
 	}
-	if (l) {
+	if (where & TRIM_LEFT) {
 		while (*string == what) {
 			++string;
 		}
@@ -145,38 +163,7 @@ static APR_INLINE char *trim(char *string, size_t length, char what, int l, int 
 	return string;
 }
 
-static APR_INLINE char *strcase(char *string, int case_type)
-{
-#ifndef CASE_LOWER
-#	define CASE_LOWER 1
-#endif
-#ifndef CASE_UPPER
-#	define CASE_UPPER 2
-#endif
-
-	char *ptr = string;
-	
-	switch (case_type)
-	{
-		case CASE_LOWER:
-			while (*ptr) {
-				apr_tolower(*ptr++);
-			}
-		break;
-		
-		case CASE_UPPER:
-			while (*ptr) {
-				apr_toupper(*ptr++);
-			}
-		break;
-		
-		default:
-		break;
-	}
-	return string;
-}
-
-static APR_INLINE int strmatch(char *match, char *string, char **begin, char **end)
+local int strmatch(const char *match, const char *string, const char **begin, const char **end)
 {
 	*begin = *end = NULL;
 	
@@ -233,7 +220,7 @@ static APR_INLINE int strmatch(char *match, char *string, char **begin, char **e
 	return 1;
 }
 
-static APR_INLINE char *struniqchr(char *string, char uniq)
+local char *struniqchr(char *string, char uniq)
 {
 	char *ptr = string;
 	
@@ -253,65 +240,51 @@ static APR_INLINE char *struniqchr(char *string, char uniq)
 	return string;
 }
 
-static APR_INLINE char *domaintree_host(apr_pool_t *pool, MOD_DT_CNF *DT, const char *name)
+local char *domaintree_host(apr_pool_t *pool, MOD_DT_CNF *DT, const char *host_name)
 {
-	if (EMPTY(name)) {
+	size_t len;
+	char *port, *host;
+	
+	if (EMPTY(host_name)) {
 		DT_LOG_WRN
 			"DomainTree: no host/server name"
 		DT_LOG_END
 		return NULL;
-	} else {
-		size_t len;
-		char *port, *ptr, *host;
-		
-		ptr = host = apr_pstrdup(pool, name);
-		
-		DT_LOG_DBG
-			"DomainTree: host name = %s", host
-		DT_LOG_END
-		
-		/* check for :NN port */
-		if ((port = strchr(ptr, ':'))) {
-			len = port - ptr;
-		} else {
-			len = strlen(ptr);
-		}
-		
-		/* strip leading & trailing dots, then lowercase */
-		ptr = host = strcase(trim(ptr, len, '.', 1, 1), CASE_LOWER);
-		
-		DT_LOG_DBG
-			"DomainTree: sane host = %s", host
-		DT_LOG_END
-		
-		return host;
 	}
+	
+	/* copy hostname */
+	host = apr_pstrdup(pool, host_name);
+	
+	/* check for :NN port */
+	if ((port = strchr(host, ':'))) {
+		len = port - host;
+		*port = NUL;
+	} else {
+		len = strlen(host);
+	}
+		
+	/* strip leading & trailing dots */
+	host = trim(host, len, '.', TRIM_BOTH);
+	
+	DT_LOG_DBG
+		"DomainTree: host name = %s for %s", host, host_name
+	DT_LOG_END
+	
+	return host;
 }
 
-static APR_INLINE const char *domaintree_elem(apr_pool_t *pool, struct domaintree *tree, const char *name, size_t length)
+local char *domaintree_path(apr_pool_t *pool, MOD_DT_CNF *DT, const char *host_name)
 {
-	struct domaintree_entry *elem = apr_palloc(pool, sizeof(struct domaintree_entry));
-	
-	APR_RING_ELEM_INIT(elem, link);
-	APR_RING_INSERT_HEAD(tree, elem, domaintree_entry, link);
-	
-	return elem->name = apr_pstrndup(pool, name, length);
-}
-
-static APR_INLINE struct domaintree *domaintree_tree(apr_pool_t *pool, MOD_DT_CNF *DT, char *host)
-{
-	size_t depth = 0;
-	char *host_ptr = host;
-	struct domaintree *tree = apr_palloc(pool, sizeof(struct domaintree));
-	
-	APR_RING_INIT(tree, domaintree_entry, link);
+	long depth = 0;
+	const char *host = host_name;
+	char *path = NULL, *host_ptr;
 	
 	while ((host_ptr = strchr(host, '.'))) {
 		
 		/* check max depth */
 		if (++depth > DT->maxdepth) {
 			DT_LOG_ERR
-				"DomainTree: maxdepth exceeded = %s", host
+				"DomainTree: maxdepth exceeded (%ld)", DT->maxdepth
 			DT_LOG_END
 			return NULL;
 		}
@@ -322,81 +295,145 @@ static APR_INLINE struct domaintree *domaintree_tree(apr_pool_t *pool, MOD_DT_CN
 			/* strip WWW */
 			if (DT->stripwww && (depth == 1) && (!strncmp(host, "www.", sizeof("www")))) {
 				DT_LOG_DBG
-					"DomainTree: stripping www."
+					"DomainTree: strip www"
 				DT_LOG_END
 			} else {
-				DT_LOG_DBG
-					"DomainTree: host part (%d) = %s", depth - 1, 
-					domaintree_elem(pool, tree, host, host_ptr - host)
-				DT_LOG_END
+				path = apr_pstrcat(pool, apr_pstrndup(pool, host, host_ptr - host), "/", path, NULL);
 			}
 		}
 		
 		host = host_ptr + 1;
 	}
 	
-	/* append last part */
-	if (!EMPTY(host)) {
-		DT_LOG_DBG
-			"DomainTree: host part (%d) = %s", depth, 
-			domaintree_elem(pool, tree, host, strlen(host))
-		DT_LOG_END
+	/* append last part if any and duplicate full path */
+	if (*host) {
+		path = apr_pstrcat(pool, host, "/", path, NULL);
 	}
 	
-	return tree;
-}
-
-static APR_INLINE char *domaintree_path(apr_pool_t *pool, MOD_DT_CNF *DT, struct domaintree *tree)
-{
-	struct domaintree_entry *elem;
-	char *path = "";
-	
-	APR_RING_FOREACH(elem, tree, domaintree_entry, link) {
-		path = apr_pstrcat(pool, path, "/", elem->name, NULL);
-	}
+	DT_LOG_DBG
+		"DomainTree: path name = %s for %s", path, host_name
+	DT_LOG_END
 	
 	return path;
 }
 
-static APR_INLINE void domaintree_fake(apr_pool_t *pool, MOD_DT_CNF *DT, char **path)
+local void domaintree_fake(apr_pool_t *pool, MOD_DT_CNF *DT, char **path)
 {
-	int more;
-	apr_hash_index_t *idx;
-	size_t recurlevel = 0;
+	int i, more;
+	long recurlevel = 0;
+	apr_pool_t *local_pool;
+	const apr_array_header_t *header = apr_table_elts(DT->aliases.faketable);
+	apr_table_entry_t *array = (apr_table_entry_t *) header->elts;
+	
+	if (APR_SUCCESS != apr_pool_create(&local_pool, pool)) {
+		return;
+	}
 	
 	do {
 		more = 0;
 		
 		if (recurlevel++ > DT->aliases.recursion) {
 			DT_LOG_ERR
-				"DomainTree: maximum alias recursion level (%d) exceeded! "
+				"DomainTree: maximum alias recursion level (%ld) exceeded! "
 				"Check if you have recursive definitions of DomainTreeAlias directives.", 
 				DT->aliases.recursion
 			DT_LOG_END
 			break;
 		}
 		
-		for (idx = apr_hash_first(pool, DT->aliases.hashtable); idx; idx = apr_hash_next(idx)) {
-			char *fake, *real, *begin, *end;
-			
-			apr_hash_this(idx, (const void **) &fake, NULL, (void **) &real);
+		for (i = 0; i < header->nelts; ++i) {
+			const char *begin, *end;
 			
 			DT_LOG_DBG
-				"DomainTree: fake test %s on %s", fake, *path
+				"DomainTree: fake test = %s on %s", array[i].key, *path
 			DT_LOG_END
 			
-			if (strmatch(fake, *path, &begin, &end)) {
-				*path = apr_pstrcat(pool, "/", apr_pstrndup(pool, *path, begin - *path), "/", real, "/", end, NULL);
-				struniqchr(*path, '/');
+			if (strmatch(array[i].key, *path, &begin, &end)) {
+				more = 1;
+				*path = apr_pstrcat(local_pool, "/", apr_pstrndup(local_pool, *path, begin - *path), "/", array[i].val, "/", end, NULL);
 				
 				DT_LOG_DBG
-					"DomainTree: fake done %s<>%s = %s", fake, real, *path
+					"DomainTree: fake done = %s (%s <> %s)", *path, array[i].key, array[i].val
 				DT_LOG_END
-				
-				more = 1;
 			}
 		}
 	} while (more && DT->aliases.recursion);
+	
+	*path = apr_pstrdup(pool, struniqchr(*path, '/'));
+	
+	apr_pool_destroy(local_pool);
+}
+
+local char *domaintree_cache_get(MOD_DT_CNF *DT, apr_time_t atime, const char *host)
+{
+	char *path = NULL;
+	struct dircache_entry *cache_entry;
+	
+	apr_global_mutex_lock(DT->dircache.lock);
+	
+	if ((cache_entry = apr_hash_get(DT->dircache.hmap, host, APR_HASH_KEY_STRING))) {
+		cache_entry->lacc = atime;
+		path = cache_entry->path;
+	}
+	
+	apr_global_mutex_unlock(DT->dircache.lock);
+	
+	if (path) {
+		DT_LOG_DBG
+			"DomainTree: cache hit = %s for %s", path, host
+		DT_LOG_END
+	}
+	
+	return path;
+}
+
+local void domaintree_cache_set(MOD_DT_CNF *DT, apr_time_t atime, const char *host, const char *path)
+{
+	apr_pool_t *pool;
+	struct dircache_entry *cache_entry;
+	
+	apr_pool_create(&pool, DT->dircache.pool);
+	cache_entry = apr_palloc(pool, sizeof(struct dircache_entry));
+	
+	cache_entry->pool = pool;
+	cache_entry->lacc = atime;
+	cache_entry->host = apr_pstrdup(pool, host);
+	cache_entry->path = apr_pstrdup(pool, path);
+	
+	apr_global_mutex_lock(DT->dircache.lock);
+	
+	if (apr_hash_count(DT->dircache.hmap) >= DT->dircache.clim) {
+		apr_hash_index_t *idx;
+		struct dircache_entry *purge_this = NULL;
+	
+		DT_LOG_WRN
+				"DomainTree: reached cache limit (%ld)", DT->dircache.clim
+		DT_LOG_END
+		
+		for (idx = apr_hash_first(DT->dircache.pool, DT->dircache.hmap); idx; idx = apr_hash_next(idx)) {
+			struct dircache_entry *current;
+		
+			apr_hash_this(idx, NULL, NULL, (void **) &current);
+			if ((!purge_this) || (purge_this->lacc > current->lacc)) {
+				purge_this = current;
+			}
+		}
+	
+		if (purge_this) {
+			DT_LOG_DBG
+					"DomainTree: cache del = %s", purge_this->host
+			DT_LOG_END
+			apr_hash_set(DT->dircache.hmap, purge_this->host, APR_HASH_KEY_STRING, NULL);
+			apr_pool_destroy(purge_this->pool);
+		}
+	}
+	apr_hash_set(DT->dircache.hmap, cache_entry->host, APR_HASH_KEY_STRING, cache_entry);
+	
+	apr_global_mutex_unlock(DT->dircache.lock);
+	
+	DT_LOG_DBG
+		"DomainTree: cache set = %s for %s", path, host
+	DT_LOG_END
 }
 
 /* }}} */
@@ -404,43 +441,77 @@ static APR_INLINE void domaintree_fake(apr_pool_t *pool, MOD_DT_CNF *DT, char **
 
 static STATUS domaintree_hook_post_config(apr_pool_t *pconf, apr_pool_t *plog, apr_pool_t *ptemp, server_rec *s)
 {
-	ap_add_version_component(pconf, MODULE "/" VERSION);
+	ap_add_version_component(pconf, "MDT/" VERSION);
 	return OK;
 }
 
 static STATUS domaintree_hook_translate_name(request_rec *r)
 {
 	MOD_DT_CNF *DT = NULL;
-	struct domaintree *tree;
-	char *path, *host;
+	char *host, *path, *docroot;
 	
-	DT = ap_get_module_config(r->server->module_config, MOD_DT_PTR);
-	if ((!DT) || (!DT->enabled)) {
+	if ((!(DT = GET_MOD_DT_CNF(r->server))) || (!DT->enabled)) {
 		return DECLINED;
 	}
+	
+	DT_LOG_DBG
+		"DomainTree: processid = %d", (int) getpid()
+	DT_LOG_END
 	
 	/* get a usable host name */
 	if (!(host = domaintree_host(r->pool, DT, ap_get_server_name(r)))) {
 		return DECLINED;
 	}
 	
-	/* build domain tree */
-	if (!(tree = domaintree_tree(r->pool, DT, host))) {
-		return DECLINED;
+	/* check cache */
+	if ((!DT->dircache.clim) || (!(path = domaintree_cache_get(DT, r->request_time, host)))) {
+		/* build path */
+		if (!(path = domaintree_path(r->pool, DT, host))) {
+			return DECLINED;
+		}
+		
+		/* apply any aliases */
+		if (apr_table_elts(DT->aliases.faketable)->nelts) {
+			domaintree_fake(r->pool, DT, &path);
+		}
+		
+		/* add to cache */
+		if (DT->dircache.clim) {
+			domaintree_cache_set(DT, r->request_time, host, path);
+		}
 	}
 	
-	/* build path */
-	if (!(path = domaintree_path(r->pool, DT, tree))) {
-		return DECLINED;
+	/* compose virtual docroot */
+	docroot = struniqchr(apr_pstrcat(r->pool, DT->prefix, "/", path, "/", DT->suffix, "/", NULL), '/');
+	
+	/* stat docroot */
+	if (DT->statroot) {
+		apr_finfo_t sb;
+		
+		switch (apr_stat(&sb, docroot, APR_FINFO_MIN, r->pool))
+		{
+			case APR_SUCCESS:
+			case APR_INCOMPLETE:
+				DT_LOG_DBG
+					"DomainTree: stat path = %s (success)", docroot
+				DT_LOG_END
+			break;
+			
+			default:
+				DT_LOG_DBG
+					"DomainTree: stat path = %s (failure)", docroot
+				DT_LOG_END
+				return DECLINED;
+			break;
+		}
 	}
 	
-	/* apply any aliases */
-	domaintree_fake(r->pool, DT, &path);
+	/* set virtual docroot */
+	apr_table_set(r->subprocess_env, "VIRTUAL_DOCUMENT_ROOT", docroot);
 	
 	/* done */
 	r->canonical_filename = "";
-	r->filename = apr_pstrcat(r->pool, DT->prefix, "/", path, "/", DT->suffix, r->uri, NULL);
-	struniqchr(r->filename, '/');
+	r->filename = apr_pstrcat(r->pool, docroot, EMPTY(r->uri) ? NULL : ('/' == *r->uri ? r->uri + 1 : r->uri), NULL);
 	
 	DT_LOG_DBG
 		"DomainTree: path done = %s", r->filename
@@ -451,8 +522,10 @@ static STATUS domaintree_hook_translate_name(request_rec *r)
 
 static void domaintree_hooks(apr_pool_t *pool)
 {
+	static const char * const pre[] = {"mod_alias.c", "mod_userdir.c", NULL};
+	
 	ap_hook_post_config(domaintree_hook_post_config, NULL, NULL, APR_HOOK_MIDDLE);
-	ap_hook_translate_name(domaintree_hook_translate_name, NULL, NULL, APR_HOOK_MIDDLE);
+	ap_hook_translate_name(domaintree_hook_translate_name, pre, NULL, APR_HOOK_FIRST);
 }
 
 /* }}} */
@@ -467,54 +540,50 @@ static void *domaintree_create_srv(apr_pool_t *p, server_rec *s)
 	DT->server = s;
 	DT->enabled = 0;
 	DT->stripwww = 1;
+	DT->statroot = 0;
 	DT->maxdepth = 20;
 	
 	DT->prefix = "/var/www";
 	DT->suffix = "public_html";
 	
-	DT->aliases.hashtable = apr_hash_make(p);
 	DT->aliases.recursion = 0;
+	DT->aliases.faketable = apr_table_make(p, 0);
+	
+	DT->dircache.clim = 0;
+	DT->dircache.hmap = apr_hash_make(p);
+	apr_pool_create(&DT->dircache.pool, p);
+	apr_global_mutex_create(&DT->dircache.lock, __FILE__, APR_LOCK_DEFAULT, p);
 	
 	return DT;
 }
 
 static const char *domaintree_enable(cmd_parms *cmd, void *conf, int flag)
 {
-	MOD_DT_CNF *DT;
-	
-	DT = ap_get_module_config(cmd->server->module_config, MOD_DT_PTR);
-	DT->enabled = flag;
-	
+	GET_MOD_DT_CNF(cmd->server)->enabled = flag;
 	return NULL;
 }
 
 static const char *domaintree_stripwww(cmd_parms *cmd, void *conf, int flag)
 {
-	MOD_DT_CNF *DT;
-	
-	DT = ap_get_module_config(cmd->server->module_config, MOD_DT_PTR);
-	DT->stripwww = flag;
-	
+	GET_MOD_DT_CNF(cmd->server)->stripwww = flag;
+	return NULL;
+}
+
+static const char *domaintree_statroot(cmd_parms *cmd, void *conf, int flag)
+{
+	GET_MOD_DT_CNF(cmd->server)->statroot = flag;
 	return NULL;
 }
 
 static const char *domaintree_prefix(cmd_parms *cmd, void *conf, const char *prefix)
 {
-	MOD_DT_CNF *DT;
-	
-	DT = ap_get_module_config(cmd->server->module_config, MOD_DT_PTR);
-	DT->prefix = EMPTY(prefix) ? "/" : trim(apr_pstrdup(cmd->pool, prefix), strlen(prefix), '/', 0, 1);
-	
+	GET_MOD_DT_CNF(cmd->server)->prefix = EMPTY(prefix) ? "/" : trim(apr_pstrdup(cmd->pool, prefix), strlen(prefix), '/', TRIM_RIGHT);
 	return NULL;
 }
 
 static const char *domaintree_suffix(cmd_parms *cmd, void *conf, const char *suffix)
 {
-	MOD_DT_CNF *DT;
-	
-	DT = ap_get_module_config(cmd->server->module_config, MOD_DT_PTR);
-	DT->suffix = EMPTY(suffix) ? "" : trim(apr_pstrdup(cmd->pool, suffix), strlen(suffix), '/', 1, 1);
-	
+	GET_MOD_DT_CNF(cmd->server)->suffix = EMPTY(suffix) ? "" : trim(apr_pstrdup(cmd->pool, suffix), strlen(suffix), '/', TRIM_BOTH);
 	return NULL;
 }
 
@@ -524,9 +593,7 @@ static const char *domaintree_maxdepth(cmd_parms *cmd, void *conf, const char *m
 	
 	if ((depth = atol(max_depth))) {
 		if (depth > 0L) {
-			MOD_DT_CNF *DT;
-			DT = ap_get_module_config(cmd->server->module_config, MOD_DT_PTR);
-			DT->maxdepth = (size_t) depth;
+			GET_MOD_DT_CNF(cmd->server)->maxdepth = depth;
 		} else {
 			return "Maximum DomainTree depth cannot be negative.";
 		}
@@ -541,9 +608,7 @@ static const char *domaintree_aliasrecursion(cmd_parms *cmd, void *conf, const c
 	
 	if ((recursion = atol(alias_recursion))) {
 		if (recursion > 0L) {
-			MOD_DT_CNF *DT;
-			DT = ap_get_module_config(cmd->server->module_config, MOD_DT_PTR);
-			DT->aliases.recursion = (size_t) recursion;
+			GET_MOD_DT_CNF(cmd->server)->aliases.recursion = recursion;
 		} else {
 			return "DomainTree alias recursion cannot be negative.";
 		}
@@ -554,15 +619,27 @@ static const char *domaintree_aliasrecursion(cmd_parms *cmd, void *conf, const c
 
 static const char *domaintree_alias(cmd_parms *cmd, void *conf, const char *fake, const char *real)
 {
-	MOD_DT_CNF *DT;
 	char *f = strtr(apr_pstrdup(cmd->pool, fake), '.', '/'), *r = strtr(apr_pstrdup(cmd->pool, real), '.', '/');
 	
-	DT = ap_get_module_config(cmd->server->module_config, MOD_DT_PTR);
-	apr_hash_set(DT->aliases.hashtable, trim(f, strlen(f), '/', 1, 1), APR_HASH_KEY_STRING, trim(r, strlen(r), '/', 1, 1));
+	apr_table_set(GET_MOD_DT_CNF(cmd->server)->aliases.faketable, trim(f, strlen(f), '/', TRIM_BOTH), trim(r, strlen(r), '/', TRIM_BOTH));
 	
 	return NULL;
 }
 
+static const char *domaintree_cache(cmd_parms *cmd, void *conf, const char *cache)
+{
+	long limit;
+	
+	if ((limit = atol(cache))) {
+		if (limit > 0L) {
+			GET_MOD_DT_CNF(cmd->server)->dircache.clim = limit;
+		} else {
+			return "DomainTree cache limit cannot be negative.";
+		}
+	}
+	
+	return NULL;
+}
 
 /* }}} */
 /* {{{ Commands */
@@ -576,6 +653,11 @@ static command_rec domaintree_commands[] = {
 	AP_INIT_FLAG(
 		"DomainTreeStripWWW", domaintree_stripwww, NULL, RSRC_CONF,
 		"Strip leading www from host. (default On)"
+	),
+
+	AP_INIT_FLAG(
+		"DomainTreeStatRoot", domaintree_statroot, NULL, RSRC_CONF,
+		"Wheter to check for the evaluated virtual document root with a stat call. (default Off)"
 	),
 
 	AP_INIT_TAKE1(
@@ -596,12 +678,17 @@ static command_rec domaintree_commands[] = {
 	AP_INIT_TAKE1(
 		"DomainTreeAliasRecursion", domaintree_aliasrecursion, NULL, RSRC_CONF,
 		"Whether (and how often at the maximum) DomainTree should walk recursively "
-		"through the aliases list as long as matching aliases are found. (Default: 0 = turned off)"
+		"through the aliases list as long as matching aliases are found. (default: 0 = turned off)"
 	),
 	
 	AP_INIT_TAKE2(
 		"DomainTreeAlias", domaintree_alias, NULL, RSRC_CONF,
 		"DomainTree aliases; e.g. DomainTreeAlias com/example/tickets com/example/support (dots or slashes equal)"
+	),
+	
+	AP_INIT_TAKE1(
+		"DomainTreeCache", domaintree_cache, NULL, RSRC_CONF,
+		"DomainTree server-wide host to directory cache; specify how many cache entries to allow (default: 0 = turned off)"
 	),
 
 	{ NULL }
@@ -616,7 +703,7 @@ module AP_MODULE_DECLARE_DATA domaintree_module = {
 	NULL,					/* merge  per-dir */
 	domaintree_create_srv,	/* create per-server */
 	NULL,					/* merge  per-server */
-	domaintree_commands,	/* apr_table_t commands */
+	domaintree_commands,	/* config commands */
 	domaintree_hooks		/* hooks */
 };
 

@@ -2,6 +2,12 @@ mod_domaintree ChangeLog
 ========================
 $Id$
 
+v1.3   -- 2006/01/00
+--------------------
+	* Code clean up
+	* Added DomainTreeCache directive
+	* Added DomainTreeStatRoot directive
+
 v1.2   -- 2005/06/19
 ~~~~~~~~~~~~~~~~~~~~
 	* DomainTreeAlias now understands 2 simple placeholders,
