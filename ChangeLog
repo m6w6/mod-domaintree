@@ -5,6 +5,7 @@ $Id$
 v1.3   -- 2006/01/00
 --------------------
 	* Code clean up
+	* Added configure etc.
 	* Added DomainTreeCache directive
 	* Added DomainTreeStatRoot directive
 

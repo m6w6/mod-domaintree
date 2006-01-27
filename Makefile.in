@@ -1,0 +1,27 @@
+APXS2=@APXS2@
+PACKAGE=@PACKAGE_NAME@
+VERSION=@PACKAGE_VERSION@
+CFLAGS=`$(APXS2) -q CFLAGS`
+all: 
+	@$(APXS2) -S CFLAGS="-DHAVE_CONFIG_H $(CFLAGS) -w" -c mod_domaintree.c
+
+install:
+	@$(APXS2) -S CFLAGS="-DHAVE_CONFIG_H $(CFLAGS) -w" -c -i mod_domaintree.c -DHAVE_CONFIG_H
+
+setup:
+	@$(APXS2) -S CFLAGS="-DHAVE_CONFIG_H $(CFLAGS) -w" -c -i -a mod_domaintree.c -DHAVE_CONFIG_H
+
+clean:
+	@rm -f mod_domaintree.*[^c]
+
+dist:
+	@tar czf $(PACKAGE)-$(VERSION).tgz \
+		../mod_domaintree/mod_domaintree.c \
+		../mod_domaintree/LICENSE.txt \
+		../mod_domaintree/ChangeLog \
+		../mod_domaintree/configure \
+		../mod_domaintree/Makefile.in \
+		../mod_domaintree/config.h.in \
+		../mod_domaintree/install-sh \
+		../mod_domaintree/missing \
+		../mod_domaintree/mkinstalldirs

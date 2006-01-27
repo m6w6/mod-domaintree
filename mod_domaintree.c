@@ -48,8 +48,12 @@
  * </pre>
  */
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #define MODULE	"mod_domaintree"
-#define AUTHOR	"mike@php.net"
+#define AUTHOR	"<mike@iworks.at"
 #define VERSION "1.3"
 
 /* {{{ Includes */
