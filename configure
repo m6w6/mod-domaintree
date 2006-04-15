@@ -3318,7 +3318,7 @@ fi;
 echo "$as_me:$LINENO: checking for apxs2" >&5
 echo $ECHO_N "checking for apxs2... $ECHO_C" >&6
 APXS2=apxs2
-if test "$with_apxs2" -a -x "$with_apxs"; then
+if test "$with_apxs2" -a -x "$with_apxs2"; then
 	APXS2=$with_apxs2
 	echo "$as_me:$LINENO: result: $APXS2" >&5
 echo "${ECHO_T}$APXS2" >&6

@@ -53,8 +53,8 @@
 #endif
 
 #define MODULE	"mod_domaintree"
-#define AUTHOR	"<mike@iworks.at"
-#define VERSION "1.3"
+#define AUTHOR	"<mike@iworks.at>"
+#define VERSION "1.4"
 
 /* {{{ Includes */
 
@@ -87,10 +87,12 @@ module AP_MODULE_DECLARE_DATA domaintree_module;
 /* }}} */
 /* {{{ Macros & Types */
 
-#define MOD_DT_CNF domaintree_conf
-#define MOD_DT_PTR (&domaintree_module)
+#define MDT_CNF domaintree_conf
+#define MDT_PTR (&domaintree_module)
 
-#define GET_MOD_DT_CNF(srv) ((MOD_DT_CNF *) ap_get_module_config((srv)->module_config, MOD_DT_PTR))
+#define GET_MDT_CNF(srv) ((MDT_CNF *) ap_get_module_config((srv)->module_config, MDT_PTR))
+
+#define IF_SET_ELSE(a, b) (a != -1) ? (a) : (b)
 
 #define NUL '\0'
 #define EMPTY(str) ((str == NULL) || (*(str) == NUL))
@@ -108,12 +110,12 @@ typedef struct {
 	apr_table_t	*faketable;
 } aliases_t;
 
-struct dircache_entry {
+typedef struct {
 	char		*host;
 	char		*path;
 	apr_time_t	lacc;
 	apr_pool_t	*pool;
-};
+} dircache_entry_t;
 
 typedef struct {
 	long				clim;
@@ -244,7 +246,7 @@ local char *struniqchr(char *string, char uniq)
 	return string;
 }
 
-local char *domaintree_host(apr_pool_t *pool, MOD_DT_CNF *DT, const char *host_name)
+local char *domaintree_host(apr_pool_t *pool, MDT_CNF *DT, const char *host_name)
 {
 	size_t len;
 	char *port, *host;
@@ -277,18 +279,18 @@ local char *domaintree_host(apr_pool_t *pool, MOD_DT_CNF *DT, const char *host_n
 	return host;
 }
 
-local char *domaintree_path(apr_pool_t *pool, MOD_DT_CNF *DT, const char *host_name)
+local char *domaintree_path(apr_pool_t *pool, MDT_CNF *DT, const char *host_name)
 {
-	long depth = 0;
+	long depth = 0, maxdepth = IF_SET_ELSE(DT->maxdepth, 20);
 	const char *host = host_name;
 	char *path = NULL, *host_ptr;
 	
 	while ((host_ptr = strchr(host, '.'))) {
 		
 		/* check max depth */
-		if (++depth > DT->maxdepth) {
+		if (++depth > maxdepth) {
 			DT_LOG_ERR
-				"DomainTree: maxdepth exceeded (%ld)", DT->maxdepth
+				"DomainTree: maxdepth exceeded (%ld)", maxdepth
 			DT_LOG_END
 			return NULL;
 		}
@@ -297,7 +299,7 @@ local char *domaintree_path(apr_pool_t *pool, MOD_DT_CNF *DT, const char *host_n
 		if (host_ptr - host) {
 			
 			/* strip WWW */
-			if (DT->stripwww && (depth == 1) && (!strncmp(host, "www.", sizeof("www")))) {
+			if ((DT->stripwww > 0) && (depth == 1) && (!strncmp(host, "www.", sizeof("www")))) {
 				DT_LOG_DBG
 					"DomainTree: strip www"
 				DT_LOG_END
@@ -321,7 +323,7 @@ local char *domaintree_path(apr_pool_t *pool, MOD_DT_CNF *DT, const char *host_n
 	return path;
 }
 
-local void domaintree_fake(apr_pool_t *pool, MOD_DT_CNF *DT, char **path)
+local void domaintree_fake(apr_pool_t *pool, MDT_CNF *DT, char **path)
 {
 	int i, more;
 	long recurlevel = 0;
@@ -361,17 +363,17 @@ local void domaintree_fake(apr_pool_t *pool, MOD_DT_CNF *DT, char **path)
 				DT_LOG_END
 			}
 		}
-	} while (more && DT->aliases.recursion);
+	} while (more && (DT->aliases.recursion > 0));
 	
 	*path = apr_pstrdup(pool, struniqchr(*path, '/'));
 	
 	apr_pool_destroy(local_pool);
 }
 
-local char *domaintree_cache_get(MOD_DT_CNF *DT, apr_time_t atime, const char *host)
+local char *domaintree_cache_get(MDT_CNF *DT, apr_time_t atime, const char *host)
 {
 	char *path = NULL;
-	struct dircache_entry *cache_entry;
+	dircache_entry_t *cache_entry;
 	
 	apr_global_mutex_lock(DT->dircache.lock);
 	
@@ -391,13 +393,13 @@ local char *domaintree_cache_get(MOD_DT_CNF *DT, apr_time_t atime, const char *h
 	return path;
 }
 
-local void domaintree_cache_set(MOD_DT_CNF *DT, apr_time_t atime, const char *host, const char *path)
+local void domaintree_cache_set(MDT_CNF *DT, apr_time_t atime, const char *host, const char *path)
 {
 	apr_pool_t *pool;
-	struct dircache_entry *cache_entry;
+	dircache_entry_t *cache_entry;
 	
 	apr_pool_create(&pool, DT->dircache.pool);
-	cache_entry = apr_palloc(pool, sizeof(struct dircache_entry));
+	cache_entry = apr_palloc(pool, sizeof(dircache_entry_t));
 	
 	cache_entry->pool = pool;
 	cache_entry->lacc = atime;
@@ -408,16 +410,16 @@ local void domaintree_cache_set(MOD_DT_CNF *DT, apr_time_t atime, const char *ho
 	
 	if (apr_hash_count(DT->dircache.hmap) >= DT->dircache.clim) {
 		apr_hash_index_t *idx;
-		struct dircache_entry *purge_this = NULL;
+		dircache_entry_t *purge_this = NULL;
 	
 		DT_LOG_WRN
 				"DomainTree: reached cache limit (%ld)", DT->dircache.clim
 		DT_LOG_END
 		
 		for (idx = apr_hash_first(DT->dircache.pool, DT->dircache.hmap); idx; idx = apr_hash_next(idx)) {
-			struct dircache_entry *current;
+			dircache_entry_t *current;
 		
-			apr_hash_this(idx, NULL, NULL, (void **) &current);
+			apr_hash_this(idx, NULL, NULL, (void *) &current);
 			if ((!purge_this) || (purge_this->lacc > current->lacc)) {
 				purge_this = current;
 			}
@@ -451,10 +453,10 @@ static STATUS domaintree_hook_post_config(apr_pool_t *pconf, apr_pool_t *plog, a
 
 static STATUS domaintree_hook_translate_name(request_rec *r)
 {
-	MOD_DT_CNF *DT = NULL;
+	MDT_CNF *DT = NULL;
 	char *host, *path, *docroot;
 	
-	if ((!(DT = GET_MOD_DT_CNF(r->server))) || (!DT->enabled)) {
+	if ((!(DT = GET_MDT_CNF(r->server))) || (DT->enabled < 1)) {
 		return DECLINED;
 	}
 	
@@ -468,7 +470,7 @@ static STATUS domaintree_hook_translate_name(request_rec *r)
 	}
 	
 	/* check cache */
-	if ((!DT->dircache.clim) || (!(path = domaintree_cache_get(DT, r->request_time, host)))) {
+	if ((DT->dircache.clim < 1) || (!(path = domaintree_cache_get(DT, r->request_time, host)))) {
 		/* build path */
 		if (!(path = domaintree_path(r->pool, DT, host))) {
 			return DECLINED;
@@ -489,7 +491,7 @@ static STATUS domaintree_hook_translate_name(request_rec *r)
 	docroot = struniqchr(apr_pstrcat(r->pool, DT->prefix, "/", path, "/", DT->suffix, "/", NULL), '/');
 	
 	/* stat docroot */
-	if (DT->statroot) {
+	if (DT->statroot > 0) {
 		apr_finfo_t sb;
 		
 		switch (apr_stat(&sb, docroot, APR_FINFO_MIN, r->pool))
@@ -537,23 +539,21 @@ static void domaintree_hooks(apr_pool_t *pool)
 
 static void *domaintree_create_srv(apr_pool_t *p, server_rec *s)
 {
-	MOD_DT_CNF *DT;
-	
-	DT = (MOD_DT_CNF *) apr_palloc(p, sizeof(MOD_DT_CNF));
+	MDT_CNF *DT= (MDT_CNF *) apr_palloc(p, sizeof(MDT_CNF));
 	
 	DT->server = s;
-	DT->enabled = 0;
-	DT->stripwww = 1;
-	DT->statroot = 0;
-	DT->maxdepth = 20;
+	DT->enabled = -1;
+	DT->stripwww = -1;
+	DT->statroot = -1;
+	DT->maxdepth = -1;
 	
 	DT->prefix = "/var/www";
 	DT->suffix = "public_html";
 	
-	DT->aliases.recursion = 0;
+	DT->aliases.recursion = -1;
 	DT->aliases.faketable = apr_table_make(p, 0);
 	
-	DT->dircache.clim = 0;
+	DT->dircache.clim = -1;
 	DT->dircache.hmap = apr_hash_make(p);
 	apr_pool_create(&DT->dircache.pool, p);
 	apr_global_mutex_create(&DT->dircache.lock, __FILE__, APR_LOCK_DEFAULT, p);
@@ -561,33 +561,53 @@ static void *domaintree_create_srv(apr_pool_t *p, server_rec *s)
 	return DT;
 }
 
+static void *domaintree_merge_srv(apr_pool_t *p, void *old_cfg_ptr, void *new_cfg_ptr)
+{
+	MDT_CNF *old_cfg = (MDT_CNF *) old_cfg_ptr;
+	MDT_CNF *new_cfg = (MDT_CNF *) new_cfg_ptr;
+	MDT_CNF *mrg_cfg = (MDT_CNF *) domaintree_create_srv(p, new_cfg->server);
+	
+	mrg_cfg->enabled = IF_SET_ELSE(new_cfg->enabled, old_cfg->enabled);
+	mrg_cfg->stripwww = IF_SET_ELSE(new_cfg->stripwww, old_cfg->stripwww);
+	mrg_cfg->statroot = IF_SET_ELSE(new_cfg->statroot, old_cfg->statroot);
+	mrg_cfg->maxdepth = IF_SET_ELSE(new_cfg->maxdepth, old_cfg->maxdepth);
+	
+	mrg_cfg->prefix = EMPTY(new_cfg->prefix) ? EMPTY(old_cfg->prefix) ? "/var/www" : old_cfg->prefix : new_cfg->prefix;
+	mrg_cfg->suffix = EMPTY(new_cfg->suffix) ? EMPTY(old_cfg->suffix) ? "public_html" : old_cfg->suffix : new_cfg->suffix;
+	
+	mrg_cfg->aliases.recursion = IF_SET_ELSE(new_cfg->aliases.recursion, old_cfg->aliases.recursion);
+	mrg_cfg->dircache.clim = IF_SET_ELSE(new_cfg->dircache.clim, old_cfg->dircache.clim);
+	
+	return mrg_cfg;
+}
+
 static const char *domaintree_enable(cmd_parms *cmd, void *conf, int flag)
 {
-	GET_MOD_DT_CNF(cmd->server)->enabled = flag;
+	GET_MDT_CNF(cmd->server)->enabled = flag;
 	return NULL;
 }
 
 static const char *domaintree_stripwww(cmd_parms *cmd, void *conf, int flag)
 {
-	GET_MOD_DT_CNF(cmd->server)->stripwww = flag;
+	GET_MDT_CNF(cmd->server)->stripwww = flag;
 	return NULL;
 }
 
 static const char *domaintree_statroot(cmd_parms *cmd, void *conf, int flag)
 {
-	GET_MOD_DT_CNF(cmd->server)->statroot = flag;
+	GET_MDT_CNF(cmd->server)->statroot = flag;
 	return NULL;
 }
 
 static const char *domaintree_prefix(cmd_parms *cmd, void *conf, const char *prefix)
 {
-	GET_MOD_DT_CNF(cmd->server)->prefix = EMPTY(prefix) ? "/" : trim(apr_pstrdup(cmd->pool, prefix), strlen(prefix), '/', TRIM_RIGHT);
+	GET_MDT_CNF(cmd->server)->prefix = EMPTY(prefix) ? "/" : trim(apr_pstrdup(cmd->pool, prefix), strlen(prefix), '/', TRIM_RIGHT);
 	return NULL;
 }
 
 static const char *domaintree_suffix(cmd_parms *cmd, void *conf, const char *suffix)
 {
-	GET_MOD_DT_CNF(cmd->server)->suffix = EMPTY(suffix) ? "" : trim(apr_pstrdup(cmd->pool, suffix), strlen(suffix), '/', TRIM_BOTH);
+	GET_MDT_CNF(cmd->server)->suffix = EMPTY(suffix) ? "" : trim(apr_pstrdup(cmd->pool, suffix), strlen(suffix), '/', TRIM_BOTH);
 	return NULL;
 }
 
@@ -597,7 +617,7 @@ static const char *domaintree_maxdepth(cmd_parms *cmd, void *conf, const char *m
 	
 	if ((depth = atol(max_depth))) {
 		if (depth > 0L) {
-			GET_MOD_DT_CNF(cmd->server)->maxdepth = depth;
+			GET_MDT_CNF(cmd->server)->maxdepth = depth;
 		} else {
 			return "Maximum DomainTree depth cannot be negative.";
 		}
@@ -612,7 +632,7 @@ static const char *domaintree_aliasrecursion(cmd_parms *cmd, void *conf, const c
 	
 	if ((recursion = atol(alias_recursion))) {
 		if (recursion > 0L) {
-			GET_MOD_DT_CNF(cmd->server)->aliases.recursion = recursion;
+			GET_MDT_CNF(cmd->server)->aliases.recursion = recursion;
 		} else {
 			return "DomainTree alias recursion cannot be negative.";
 		}
@@ -625,7 +645,7 @@ static const char *domaintree_alias(cmd_parms *cmd, void *conf, const char *fake
 {
 	char *f = strtr(apr_pstrdup(cmd->pool, fake), '.', '/'), *r = strtr(apr_pstrdup(cmd->pool, real), '.', '/');
 	
-	apr_table_set(GET_MOD_DT_CNF(cmd->server)->aliases.faketable, trim(f, strlen(f), '/', TRIM_BOTH), trim(r, strlen(r), '/', TRIM_BOTH));
+	apr_table_set(GET_MDT_CNF(cmd->server)->aliases.faketable, trim(f, strlen(f), '/', TRIM_BOTH), trim(r, strlen(r), '/', TRIM_BOTH));
 	
 	return NULL;
 }
@@ -636,7 +656,7 @@ static const char *domaintree_cache(cmd_parms *cmd, void *conf, const char *cach
 	
 	if ((limit = atol(cache))) {
 		if (limit > 0L) {
-			GET_MOD_DT_CNF(cmd->server)->dircache.clim = limit;
+			GET_MDT_CNF(cmd->server)->dircache.clim = limit;
 		} else {
 			return "DomainTree cache limit cannot be negative.";
 		}
@@ -694,7 +714,7 @@ static command_rec domaintree_commands[] = {
 		"DomainTreeCache", domaintree_cache, NULL, RSRC_CONF,
 		"DomainTree server-wide host to directory cache; specify how many cache entries to allow (default: 0 = turned off)"
 	),
-
+	
 	{ NULL }
 };
 
@@ -706,7 +726,7 @@ module AP_MODULE_DECLARE_DATA domaintree_module = {
 	NULL,					/* create per-dir */
 	NULL,					/* merge  per-dir */
 	domaintree_create_srv,	/* create per-server */
-	NULL,					/* merge  per-server */
+	domaintree_merge_srv,	/* merge  per-server */
 	domaintree_commands,	/* config commands */
 	domaintree_hooks		/* hooks */
 };

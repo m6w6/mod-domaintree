@@ -1,6 +1,6 @@
 
 AC_PREREQ(2.59)
-AC_INIT(mod_domaintree, 1.3, mike@iworks.at)
+AC_INIT(mod_domaintree, 1.4, mike@iworks.at)
 
 AC_CONFIG_SRCDIR([mod_domaintree.c])
 AC_CONFIG_HEADER([config.h])
@@ -15,7 +15,7 @@ AC_ARG_WITH([apxs2], AC_HELP_STRING([--with-apxs2], [where the apxs2 tool is loc
 
 AC_MSG_CHECKING([for apxs2])
 APXS2=apxs2
-if test "$with_apxs2" -a -x "$with_apxs"; then
+if test "$with_apxs2" -a -x "$with_apxs2"; then
 	APXS2=$with_apxs2
 	AC_MSG_RESULT([$APXS2])
 else
