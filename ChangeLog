@@ -2,7 +2,14 @@ mod_domaintree ChangeLog
 ========================
 $Id$
 
-v1.3   -- 2006/01/00
+v1.4  -- 2006/05/29
+-------------------
+	* Added per-server configuration merge hook
+	* #ifdef'd out pid logging
+	* Replaced links with actual files in tarball
+	* Add debug symbols by default
+
+v1.3   -- 2006/01/28
 --------------------
 	* Code clean up
 	* Added configure etc.
