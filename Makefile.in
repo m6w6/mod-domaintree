@@ -12,7 +12,13 @@ setup:
 	@$(APXS2) -S CFLAGS="-DHAVE_CONFIG_H $(CFLAGS) -g -w" -c -i -a mod_domaintree.c
 
 clean:
-	@rm -f mod_domaintree.*[^c]
+	@rm -f \
+		mod_domaintree.la \
+		mod_domaintree.slo \
+		mod_domaintree.o \
+		mod_domaintree.lo \
+		-rf \
+		.libs
 
 dist:
 	@tar czfh $(PACKAGE)-$(VERSION).tgz \

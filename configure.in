@@ -1,6 +1,6 @@
 
 AC_PREREQ(2.59)
-AC_INIT(mod_domaintree, 1.5, mike@iworks.at)
+AC_INIT(mod_domaintree, 1.6, mike@iworks.at)
 
 AC_CONFIG_SRCDIR([mod_domaintree.c])
 AC_CONFIG_HEADER([config.h])

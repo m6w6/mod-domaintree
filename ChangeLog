@@ -2,9 +2,10 @@ mod_domaintree ChangeLog
 ========================
 $Id$
 
-v1.6  -- 2006/05/??
+v1.6  -- 2007/05/07
 -------------------
 	* Added suexec hook and DomainTreeSuexec directory configuration directive
+	* Fixed `make clean`
 
 v1.5  -- 2006/12/08
 -------------------

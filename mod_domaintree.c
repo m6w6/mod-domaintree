@@ -60,7 +60,7 @@
 
 #define MODULE	"mod_domaintree"
 #define AUTHOR	"<mike@iworks.at>"
-#define VERSION "1.5"
+#define VERSION "1.6"
 
 /* {{{ Includes */
 
