@@ -31,6 +31,9 @@
  * DomainTreeAlias /*one/ /anyone/
  * DomainTreeIgnore *.foo.com *.foo.co.uk
  * DomainTreeForbid html.*
+ * <Directory "/sites/.../home">
+ *     DomainTreeSuexec
+ * </Directory>
  *
  *	/sites
  *		+- /at
@@ -89,6 +92,13 @@ module AP_MODULE_DECLARE_DATA domaintree_module;
 /* }}} */
 /* {{{ Macros & Types */
 
+#ifndef HAVE_UNIX_SUEXEC
+#	ifdef SUEXEC_BIN
+#		define HAVE_UNIX_SUEXEC
+#		include "unixd.h"
+#	endif
+#endif
+
 #define DBG 0
 
 #define MDT_CNF domaintree_conf
@@ -145,6 +155,9 @@ typedef struct {
 	dircache_t	dircache;
 	hostlist_t	ignore;
 	hostlist_t	forbid;
+#ifdef HAVE_UNIX_SUEXEC
+	hostlist_t	suexec;
+#endif
 } domaintree_conf;
 
 /* }}} */
@@ -427,7 +440,10 @@ local void domaintree_fake(apr_pool_t *pool, MDT_CNF *DT, char **path)
 	apr_pool_destroy(local_pool);
 }
 
-local int domaintree_test(MDT_CNF *DT, const char *host, int argc, const char **argv)
+#define TEST_IS_BOS 1
+#define TEST_IS_EOS 2
+#define TEST_IS_AOS 3
+local int domaintree_test(MDT_CNF *DT, const char *host, int argc, const char **argv, int flags, const char **bos, const char **eos)
 {
 	if (argc) {
 		int i;
@@ -435,9 +451,21 @@ local int domaintree_test(MDT_CNF *DT, const char *host, int argc, const char **
 		
 		for (i = 0; i < argc; ++i) {
 			ap_log_error(DT_LOG_DBG "host test = %s <> %s", argv[i], host);
-			if (strmatch(argv[i], host, &begin, &end) && begin == host && end == host_end) {
+			if (strmatch(argv[i], host, &begin, &end)) {
+				if ((flags & TEST_IS_BOS) && begin != host) {
+					continue;
+				}
+				if ((flags & TEST_IS_EOS) && end != host_end) {
+					continue;
+				}
+				if (bos) {
+					*bos = begin;
+				}
+				if (eos) {
+					*eos = end;
+				}
 				ap_log_error(DT_LOG_DBG "test done = %s by %s", host, argv[i]);
-				return 1;
+				return i+1;
 			}
 		}
 	}
@@ -472,12 +500,12 @@ static STATUS domaintree_hook_translate_name(request_rec *r)
 	}
 	
 	/* ignore? */
-	if (domaintree_test(DT, host, DT->ignore->nelts, (const char **) DT->ignore->elts)) {
+	if (domaintree_test(DT, host, DT->ignore->nelts, (const char **) DT->ignore->elts, TEST_IS_AOS, NULL, NULL)) {
 		return DECLINED;
 	}
 	
 	/* forbid? */
-	if (domaintree_test(DT, host, DT->forbid->nelts, (const char **) DT->forbid->elts)) {
+	if (domaintree_test(DT, host, DT->forbid->nelts, (const char **) DT->forbid->elts, TEST_IS_AOS, NULL, NULL)) {
 		return HTTP_FORBIDDEN;
 	}
 	
@@ -521,6 +549,22 @@ static STATUS domaintree_hook_translate_name(request_rec *r)
 	/* set virtual docroot */
 	apr_table_set(r->subprocess_env, "VIRTUAL_DOCUMENT_ROOT", docroot);
 	
+#ifdef HAVE_UNIX_SUEXEC
+	/* set suexec note */
+	{
+		const char *username, *separator;
+		
+		if (domaintree_test(DT, docroot, DT->suexec->nelts, DT->suexec->elts, TEST_IS_BOS, NULL, &username)) {
+			if ((separator = strchr(username, '/'))) {
+				username = apr_pstrndup(r->pool, username, separator-username);
+			} else {
+				username = apr_pstrdup(r->pool, username);
+			}
+			apr_table_setn(r->notes, "mod_domaintree.suexec", username);
+		}
+	}
+#endif
+	
 	/* done */
 	r->canonical_filename = "";
 	r->filename = apr_pstrcat(r->pool, docroot, EMPTY(r->uri) ? NULL : ('/' == *r->uri ? r->uri + 1 : r->uri), NULL);
@@ -530,12 +574,34 @@ static STATUS domaintree_hook_translate_name(request_rec *r)
 	return OK;
 }
 
+#ifdef HAVE_UNIX_SUEXEC
+static STATUS domaintree_hook_get_suexec_identity(const request_rec *r)
+{
+	ap_unix_identity_t *ugid = NULL;
+#if APR_HAS_USER
+	const char *username;
+	
+	if ((username = apr_table_get(r->notes, "mod_domaintree.suexec"))) {
+		if ((ugid = apr_palloc(r->pool, sizeof(*ugid)))) {
+			if (APR_SUCCESS == apr_uid_get(&ugid->uid, &ugid->gid, username, r->pool)) {
+				ugid->userdir = 1;
+			}
+		}
+	}
+#endif
+	return ugid;
+}
+#endif
+
 static void domaintree_hooks(apr_pool_t *pool)
 {
 	static const char * const pre[] = {"mod_alias.c", "mod_userdir.c", NULL};
 	
 	ap_hook_post_config(domaintree_hook_post_config, NULL, NULL, APR_HOOK_MIDDLE);
 	ap_hook_translate_name(domaintree_hook_translate_name, pre, NULL, APR_HOOK_FIRST);
+#ifdef HAVE_UNIX_SUEXEC
+	ap_hook_get_suexec_identity(domaintree_hook_get_suexec_identity, NULL, NULL, APR_HOOK_FIRST);
+#endif
 }
 
 /* }}} */
@@ -556,6 +622,9 @@ static void *domaintree_create_srv(apr_pool_t *p, server_rec *s)
 	
 	DT->ignore = apr_array_make(p, 0, sizeof(char *));
 	DT->forbid = apr_array_make(p, 0, sizeof(char *));
+#ifdef HAVE_UNIX_SUEXEC
+	DT->suexec = apr_array_make(p, 0, sizeof(char *));
+#endif
 	
 	DT->aliases.recursion = -1;
 	DT->aliases.faketable = apr_table_make(p, 0);
@@ -586,6 +655,9 @@ static void *domaintree_merge_srv(apr_pool_t *p, void *old_cfg_ptr, void *new_cf
 	
 	DT->ignore = apr_array_append(p, new_cfg->ignore, old_cfg->ignore);
 	DT->forbid = apr_array_append(p, new_cfg->forbid, old_cfg->forbid);
+#ifdef HAVE_UNIX_SUEXEC
+	DT->suexec = apr_array_append(p, new_cfg->suexec, old_cfg->suexec);
+#endif
 	
 	DT->aliases.recursion = IF_SET_ELSE(new_cfg->aliases.recursion, old_cfg->aliases.recursion);
 	DT->aliases.faketable = apr_table_overlay(p, new_cfg->aliases.faketable, old_cfg->aliases.faketable);
@@ -695,6 +767,31 @@ static const char *domaintree_init_forbid(cmd_parms *cmd, void *conf, const char
 	return NULL;
 }
 
+static const char *domaintree_init_suexec(cmd_parms *cmd, void *conf)
+{
+#ifdef HAVE_UNIX_SUEXEC
+	apr_finfo_t sb;
+	
+	if (!cmd->path) {
+		return "DomainTreeSuexec is a per directory configuration directive";
+	}
+	
+	switch (apr_stat(&sb, cmd->path, APR_FINFO_MIN, cmd->pool)) {
+		case APR_SUCCESS:
+		case APR_INCOMPLETE:
+			break;
+		default:
+			return "DomainTreeSuexec must be defined for an existing path";
+	}
+	
+	*((char **) apr_array_push(GET_MDT_CNF(cmd->server)->suexec)) = trim(apr_pstrdup(cmd->pool, cmd->path), strlen(cmd->path), '.', TRIM_BOTH);
+	
+	return NULL;
+#else
+	return "HAVE_UNIX_SUEXEC was undefined at compile time";
+#endif
+}
+
 /* }}} */
 /* {{{ Commands */
 
@@ -753,6 +850,11 @@ static command_rec domaintree_commands[] = {
 	AP_INIT_ITERATE(
 		"DomainTreeForbid", domaintree_init_forbid, NULL, RSRC_CONF,
 		"DomanTree forbidden hosts; uses the same matching algorithm like DomainTreeAlias"
+	),
+	
+	AP_INIT_NO_ARGS(
+		"DomainTreeSuexec", domaintree_init_suexec, NULL, ACCESS_CONF,
+		"DomainTree user home directory; enable suexec hook for domain based user-dir hosting in this directory"
 	),
 	
 	{ NULL }
