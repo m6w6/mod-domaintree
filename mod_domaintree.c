@@ -31,7 +31,8 @@
  * DomainTreeAlias /*one/ /anyone/
  * DomainTreeIgnore *.foo.com *.foo.co.uk
  * DomainTreeForbid html.*
- * <Directory "/sites/.../home">
+ * <Directory "/sites/com/example/users">
+ * # e.g. a symlink to /home
  *     DomainTreeSuexec
  * </Directory>
  *
@@ -143,7 +144,7 @@ typedef struct {
 	apr_global_mutex_t	*lock;
 } dircache_t;
 
-typedef apr_array_header_t *hostlist_t;
+typedef apr_array_header_t *hostlist_t, *pathlist_t;
 
 typedef struct {
 	server_rec	*server;
@@ -158,7 +159,7 @@ typedef struct {
 	hostlist_t	ignore;
 	hostlist_t	forbid;
 #ifdef HAVE_UNIX_SUEXEC
-	hostlist_t	suexec;
+	pathlist_t	suexec;
 #endif
 } domaintree_conf;
 
@@ -577,7 +578,7 @@ static STATUS domaintree_hook_translate_name(request_rec *r)
 }
 
 #ifdef HAVE_UNIX_SUEXEC
-static STATUS domaintree_hook_get_suexec_identity(const request_rec *r)
+static ap_unix_identity_t *domaintree_hook_get_suexec_identity(const request_rec *r)
 {
 	ap_unix_identity_t *ugid = NULL;
 #if APR_HAS_USER
