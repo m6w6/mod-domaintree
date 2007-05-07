@@ -95,8 +95,10 @@ module AP_MODULE_DECLARE_DATA domaintree_module;
 #ifndef HAVE_UNIX_SUEXEC
 #	ifdef SUEXEC_BIN
 #		define HAVE_UNIX_SUEXEC
-#		include "unixd.h"
 #	endif
+#endif
+#ifdef HAVE_UNIX_SUEXEC
+#	include "unixd.h"
 #endif
 
 #define DBG 0
